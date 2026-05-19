@@ -33,12 +33,23 @@ import os
 from ament_index_python import get_resource
 from geometry_msgs.msg import Twist, TwistStamped
 from python_qt_binding import loadUi
-from python_qt_binding.QtCore import Qt, QTimer, Slot
+from python_qt_binding.QtCore import QEvent, QObject, Qt, QTimer, Slot
 from python_qt_binding.QtGui import QKeySequence
 from python_qt_binding.QtWidgets import QShortcut, QWidget
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile
 from rqt_gui_py.plugin import Plugin
+
+
+class _ArrowShortcutEnabler(QObject):
+    """Swallow ShortcutOverride for arrow keys so QShortcut wins over QSlider's built-in arrow handling."""
+
+    _ARROWS = (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.ShortcutOverride and event.key() in self._ARROWS:
+            return True
+        return False
 
 
 class RobotSteering(Plugin):
@@ -106,6 +117,10 @@ class RobotSteering(Plugin):
         self._widget.min_z_angular_double_spin_box.valueChanged.connect(
             self._on_min_z_angular_changed)
 
+        self._arrow_enabler = _ArrowShortcutEnabler(self._widget)
+        self._widget.x_linear_slider.installEventFilter(self._arrow_enabler)
+        self._widget.z_angular_slider.installEventFilter(self._arrow_enabler)
+
         self.shortcut_w = QShortcut(QKeySequence(Qt.Key_W), self._widget)
         self.shortcut_w.setContext(Qt.ApplicationShortcut)
         self.shortcut_w.activated.connect(self._on_increase_x_linear_pressed)
@@ -156,6 +171,40 @@ class RobotSteering(Plugin):
         self.shortcut_shift_d.activated.connect(
             self._on_strong_decrease_z_angular_pressed)
 
+        self.shortcut_up = QShortcut(QKeySequence(Qt.Key_Up), self._widget)
+        self.shortcut_up.setContext(Qt.ApplicationShortcut)
+        self.shortcut_up.activated.connect(self._on_increase_x_linear_pressed)
+        self.shortcut_down = QShortcut(QKeySequence(Qt.Key_Down), self._widget)
+        self.shortcut_down.setContext(Qt.ApplicationShortcut)
+        self.shortcut_down.activated.connect(self._on_decrease_x_linear_pressed)
+        self.shortcut_left = QShortcut(QKeySequence(Qt.Key_Left), self._widget)
+        self.shortcut_left.setContext(Qt.ApplicationShortcut)
+        self.shortcut_left.activated.connect(self._on_increase_z_angular_pressed)
+        self.shortcut_right = QShortcut(QKeySequence(Qt.Key_Right), self._widget)
+        self.shortcut_right.setContext(Qt.ApplicationShortcut)
+        self.shortcut_right.activated.connect(self._on_decrease_z_angular_pressed)
+
+        self.shortcut_shift_up = QShortcut(
+            QKeySequence(Qt.SHIFT + Qt.Key_Up), self._widget)
+        self.shortcut_shift_up.setContext(Qt.ApplicationShortcut)
+        self.shortcut_shift_up.activated.connect(
+            self._on_strong_increase_x_linear_pressed)
+        self.shortcut_shift_down = QShortcut(
+            QKeySequence(Qt.SHIFT + Qt.Key_Down), self._widget)
+        self.shortcut_shift_down.setContext(Qt.ApplicationShortcut)
+        self.shortcut_shift_down.activated.connect(
+            self._on_strong_decrease_x_linear_pressed)
+        self.shortcut_shift_left = QShortcut(
+            QKeySequence(Qt.SHIFT + Qt.Key_Left), self._widget)
+        self.shortcut_shift_left.setContext(Qt.ApplicationShortcut)
+        self.shortcut_shift_left.activated.connect(
+            self._on_strong_increase_z_angular_pressed)
+        self.shortcut_shift_right = QShortcut(
+            QKeySequence(Qt.SHIFT + Qt.Key_Right), self._widget)
+        self.shortcut_shift_right.setContext(Qt.ApplicationShortcut)
+        self.shortcut_shift_right.activated.connect(
+            self._on_strong_decrease_z_angular_pressed)
+
         self.shortcut_space = QShortcut(
             QKeySequence(Qt.Key_Space), self._widget)
         self.shortcut_space.setContext(Qt.ApplicationShortcut)
@@ -168,17 +217,17 @@ class RobotSteering(Plugin):
         self._widget.stop_push_button.setToolTip(
             self._widget.stop_push_button.toolTip() + ' ' + self.tr('([Shift +] Space)'))
         self._widget.increase_x_linear_push_button.setToolTip(
-            self._widget.increase_x_linear_push_button.toolTip() + ' ' + self.tr('([Shift +] W)'))
+            self._widget.increase_x_linear_push_button.toolTip() + ' ' + self.tr('([Shift +] W / Up)'))
         self._widget.reset_x_linear_push_button.setToolTip(
             self._widget.reset_x_linear_push_button.toolTip() + ' ' + self.tr('([Shift +] X)'))
         self._widget.decrease_x_linear_push_button.setToolTip(
-            self._widget.decrease_x_linear_push_button.toolTip() + ' ' + self.tr('([Shift +] S)'))
+            self._widget.decrease_x_linear_push_button.toolTip() + ' ' + self.tr('([Shift +] S / Down)'))
         self._widget.increase_z_angular_push_button.setToolTip(
-            self._widget.increase_z_angular_push_button.toolTip() + ' ' + self.tr('([Shift +] A)'))
+            self._widget.increase_z_angular_push_button.toolTip() + ' ' + self.tr('([Shift +] A / Left)'))
         self._widget.reset_z_angular_push_button.setToolTip(
             self._widget.reset_z_angular_push_button.toolTip() + ' ' + self.tr('([Shift +] Z)'))
         self._widget.decrease_z_angular_push_button.setToolTip(
-            self._widget.decrease_z_angular_push_button.toolTip() + ' ' + self.tr('([Shift +] D)'))
+            self._widget.decrease_z_angular_push_button.toolTip() + ' ' + self.tr('([Shift +] D / Right)'))
 
         # timer to consecutively send twist messages
         self._update_parameter_timer = QTimer(self)
