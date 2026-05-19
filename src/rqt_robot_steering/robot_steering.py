@@ -35,7 +35,7 @@ from geometry_msgs.msg import Twist, TwistStamped
 from python_qt_binding import loadUi
 from python_qt_binding.QtCore import QEvent, QObject, Qt, QTimer, Slot
 from python_qt_binding.QtGui import QKeySequence
-from python_qt_binding.QtWidgets import QShortcut, QWidget
+from python_qt_binding.QtWidgets import QApplication, QCheckBox, QShortcut, QWidget
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile
 from rqt_gui_py.plugin import Plugin
@@ -52,6 +52,51 @@ class _ArrowShortcutEnabler(QObject):
         return False
 
 
+class _TeleopKeyFilter(QObject):
+    """Application-level key filter for direct-mode autobrake and Alt-toggle."""
+
+    _LINEAR = (Qt.Key_W, Qt.Key_S, Qt.Key_Up, Qt.Key_Down)
+    _ANGULAR = (Qt.Key_A, Qt.Key_D, Qt.Key_Left, Qt.Key_Right)
+
+    def __init__(self, plugin):
+        super().__init__()
+        self._plugin = plugin
+
+    def eventFilter(self, obj, event):
+        et = event.type()
+        if et == QEvent.ShortcutOverride and not event.isAutoRepeat():
+            key = event.key()
+            if event.modifiers() & Qt.AltModifier and key != Qt.Key_Alt:
+                self._plugin._alt_pristine = False
+            if self._plugin._direct:
+                if key in self._LINEAR:
+                    self._plugin._save_linear()
+                elif key in self._ANGULAR:
+                    self._plugin._save_angular()
+            return False
+        if et == QEvent.KeyPress and not event.isAutoRepeat():
+            key = event.key()
+            if key == Qt.Key_Alt:
+                self._plugin._alt_pristine = True
+            elif event.modifiers() & Qt.AltModifier:
+                self._plugin._alt_pristine = False
+            return False
+        if et == QEvent.KeyRelease and not event.isAutoRepeat():
+            key = event.key()
+            if key == Qt.Key_Alt and self._plugin._alt_pristine:
+                self._plugin._alt_pristine = False
+                self._plugin._toggle_direct()
+                return True
+            if self._plugin._direct:
+                if key in self._LINEAR:
+                    self._plugin._restore_linear()
+                    return True
+                if key in self._ANGULAR:
+                    self._plugin._restore_angular()
+                    return True
+        return False
+
+
 class RobotSteering(Plugin):
 
     slider_factor = 1000.0
@@ -64,6 +109,7 @@ class RobotSteering(Plugin):
 
         self._node.declare_parameter('default_topic', Parameter.Type.STRING)
         self._node.declare_parameter('default_stamped', Parameter.Type.BOOL)
+        self._node.declare_parameter('default_direct', Parameter.Type.BOOL)
         self._node.declare_parameter('default_vx_min', Parameter.Type.DOUBLE)
         self._node.declare_parameter('default_vx_max', Parameter.Type.DOUBLE)
         self._node.declare_parameter('default_vw_min', Parameter.Type.DOUBLE)
@@ -72,6 +118,10 @@ class RobotSteering(Plugin):
         self._publisher = None
         self._publisher_stamped = None
         self._use_stamped = True
+        self._direct = False
+        self._alt_pristine = False
+        self._saved_linear = None
+        self._saved_angular = None
 
         self._widget = QWidget()
         _, package_path = get_resource('packages', 'rqt_robot_steering')
@@ -84,10 +134,19 @@ class RobotSteering(Plugin):
                 self._widget.windowTitle() + (' (%d)' % context.serial_number()))
         context.add_widget(self._widget)
 
+        self._widget.direct_check_box = QCheckBox(self.tr('direct'), self._widget)
+        self._widget.direct_check_box.setToolTip(
+            self.tr('jump-to-limit, restore on release (Alt toggles, Space stops)'))
+        self._widget.horizontalLayout.insertWidget(
+            self._widget.horizontalLayout.indexOf(self._widget.stop_push_button) + 1,
+            self._widget.direct_check_box)
+
         self._widget.topic_line_edit.textChanged.connect(
             self._on_topic_changed)
         self._widget.stamped_check_box.stateChanged.connect(
             self._on_stamped_cb_changed)
+        self._widget.direct_check_box.stateChanged.connect(
+            self._on_direct_cb_changed)
         self._widget.stop_push_button.pressed.connect(self._on_stop_pressed)
 
         self._widget.x_linear_slider.valueChanged.connect(
@@ -120,6 +179,9 @@ class RobotSteering(Plugin):
         self._arrow_enabler = _ArrowShortcutEnabler(self._widget)
         self._widget.x_linear_slider.installEventFilter(self._arrow_enabler)
         self._widget.z_angular_slider.installEventFilter(self._arrow_enabler)
+
+        self._teleop_filter = _TeleopKeyFilter(self)
+        QApplication.instance().installEventFilter(self._teleop_filter)
 
         self.shortcut_w = QShortcut(QKeySequence(Qt.Key_W), self._widget)
         self.shortcut_w.setContext(Qt.ApplicationShortcut)
@@ -282,6 +344,8 @@ class RobotSteering(Plugin):
             print('Error creating publisher: %s' % e)
 
     def _on_stop_pressed(self):
+        self._saved_linear = None
+        self._saved_angular = None
         # If the current value of sliders is zero directly send stop twist msg
         if self._widget.x_linear_slider.value() == 0 and \
                 self._widget.z_angular_slider.value() == 0:
@@ -302,26 +366,26 @@ class RobotSteering(Plugin):
         self._on_parameter_changed()
 
     def _on_increase_x_linear_pressed(self):
-        self._widget.x_linear_slider.setValue(
-            self._widget.x_linear_slider.value() + self._widget.x_linear_slider.singleStep())
+        slider = self._widget.x_linear_slider
+        slider.setValue(slider.maximum() if self._direct else slider.value() + slider.singleStep())
 
     def _on_reset_x_linear_pressed(self):
         self._widget.x_linear_slider.setValue(0)
 
     def _on_decrease_x_linear_pressed(self):
-        self._widget.x_linear_slider.setValue(
-            self._widget.x_linear_slider.value() - self._widget.x_linear_slider.singleStep())
+        slider = self._widget.x_linear_slider
+        slider.setValue(slider.minimum() if self._direct else slider.value() - slider.singleStep())
 
     def _on_increase_z_angular_pressed(self):
-        self._widget.z_angular_slider.setValue(
-            self._widget.z_angular_slider.value() + self._widget.z_angular_slider.singleStep())
+        slider = self._widget.z_angular_slider
+        slider.setValue(slider.maximum() if self._direct else slider.value() + slider.singleStep())
 
     def _on_reset_z_angular_pressed(self):
         self._widget.z_angular_slider.setValue(0)
 
     def _on_decrease_z_angular_pressed(self):
-        self._widget.z_angular_slider.setValue(
-            self._widget.z_angular_slider.value() - self._widget.z_angular_slider.singleStep())
+        slider = self._widget.z_angular_slider
+        slider.setValue(slider.minimum() if self._direct else slider.value() - slider.singleStep())
 
     def _on_max_x_linear_changed(self, value):
         self._widget.x_linear_slider.setMaximum(
@@ -340,20 +404,47 @@ class RobotSteering(Plugin):
             int(value * RobotSteering.slider_factor))
 
     def _on_strong_increase_x_linear_pressed(self):
-        self._widget.x_linear_slider.setValue(
-            self._widget.x_linear_slider.value() + self._widget.x_linear_slider.pageStep())
+        slider = self._widget.x_linear_slider
+        slider.setValue(slider.maximum() if self._direct else slider.value() + slider.pageStep())
 
     def _on_strong_decrease_x_linear_pressed(self):
-        self._widget.x_linear_slider.setValue(
-            self._widget.x_linear_slider.value() - self._widget.x_linear_slider.pageStep())
+        slider = self._widget.x_linear_slider
+        slider.setValue(slider.minimum() if self._direct else slider.value() - slider.pageStep())
 
     def _on_strong_increase_z_angular_pressed(self):
-        self._widget.z_angular_slider.setValue(
-            self._widget.z_angular_slider.value() + self._widget.z_angular_slider.pageStep())
+        slider = self._widget.z_angular_slider
+        slider.setValue(slider.maximum() if self._direct else slider.value() + slider.pageStep())
 
     def _on_strong_decrease_z_angular_pressed(self):
-        self._widget.z_angular_slider.setValue(
-            self._widget.z_angular_slider.value() - self._widget.z_angular_slider.pageStep())
+        slider = self._widget.z_angular_slider
+        slider.setValue(slider.minimum() if self._direct else slider.value() - slider.pageStep())
+
+    @Slot(int)
+    def _on_direct_cb_changed(self, state):
+        self._direct = bool(int(state))
+        self._saved_linear = None
+        self._saved_angular = None
+
+    def _toggle_direct(self):
+        self._widget.direct_check_box.setChecked(not self._widget.direct_check_box.isChecked())
+
+    def _save_linear(self):
+        if self._saved_linear is None:
+            self._saved_linear = self._widget.x_linear_slider.value()
+
+    def _save_angular(self):
+        if self._saved_angular is None:
+            self._saved_angular = self._widget.z_angular_slider.value()
+
+    def _restore_linear(self):
+        if self._saved_linear is not None:
+            self._widget.x_linear_slider.setValue(self._saved_linear)
+            self._saved_linear = None
+
+    def _restore_angular(self):
+        if self._saved_angular is not None:
+            self._widget.z_angular_slider.setValue(self._saved_angular)
+            self._saved_angular = None
 
     def _on_parameter_changed(self):
         self._send_twist(
@@ -403,6 +494,9 @@ class RobotSteering(Plugin):
         self._update_parameter_timer.stop()
         if self._update_topic_type_timer is not None:
             self._update_topic_type_timer.stop()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self._teleop_filter)
         self._unregister_publisher()
 
     def save_settings(self, plugin_settings, instance_settings):
@@ -410,6 +504,8 @@ class RobotSteering(Plugin):
             'topic', self._widget.topic_line_edit.text())
         instance_settings.set_value(
             'stamped', self._widget.stamped_check_box.isChecked())
+        instance_settings.set_value(
+            'direct', self._widget.direct_check_box.isChecked())
         instance_settings.set_value(
             'vx_max', self._widget.max_x_linear_double_spin_box.value())
         instance_settings.set_value(
@@ -433,6 +529,14 @@ class RobotSteering(Plugin):
         if isinstance(value, Parameter):
             value = value.get_parameter_value().bool_value
         self._widget.stamped_check_box.setChecked(value)
+
+        value = self._widget.direct_check_box.isChecked()
+        if instance_settings.contains('direct'):
+            value = instance_settings.value('direct', value) in ['true', 'True']
+        value = self._node.get_parameter_or('default_direct', value)
+        if isinstance(value, Parameter):
+            value = value.get_parameter_value().bool_value
+        self._widget.direct_check_box.setChecked(value)
 
         value = self._widget.max_x_linear_double_spin_box.value()
         if instance_settings.contains('vx_max'):
