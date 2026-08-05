@@ -10,7 +10,7 @@
         <statustip>Plugins related to robot tools.</statustip>
       </group>
       <label>Robot Steering</label>
-      <icon type="theme">input-gaming</icon>
+      <icon type="file">resource/robot_steering_icon.png</icon>
       <statustip>A Python GUI plugin for steering a robot using geometry_msgs/Twist messages.</statustip>
     </qtgui>
   </class>
